@@ -1,97 +1,122 @@
-# --- BLOQUE DE PRUEBA HÍBRIDO (OFFLINE + ONLINE) ---
+import streamlit as st
+import requests
+import time
+import re
+import io
+import zipfile
+import urllib3
 
+# Desactivar advertencias de SSL (necesario para el SRI)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- MÓDULO DE DESCARGA HÍBRIDA (OFFLINE + ONLINE) ---
 def bloque_sri(titulo, tipo_filtro, key):
-    st.subheader(f"🧪 Test Híbrido: {titulo}")
+    # 1. Configuración de URLs y Headers dentro del módulo para asegurar visibilidad
+    URL_OFFLINE = "https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl"
+    URL_ONLINE  = "https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantes?wsdl"
+    HEADERS_WS = {
+        "Content-Type": "text/xml;charset=UTF-8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    }
+
+    st.subheader(f"{titulo} (Modo Híbrido)")
     up = st.file_uploader(f"Cargar TXT para {titulo}", type=["txt"], key=key)
     
-    if up and st.button(f"Iniciar Descarga Híbrida", key=f"b_{key}"):
-        # 1. Extracción de Claves
-        content = up.read().decode("latin-1", errors="ignore")
-        # Regex 48,49 para capturar incluso si Excel se comió el 0 inicial
+    if up and st.button(f"Iniciar Descarga", key=f"b_{key}"):
+        # 2. Lectura y Limpieza del TXT
+        try:
+            content = up.read().decode("latin-1", errors="ignore")
+        except:
+            content = up.read().decode("utf-8", errors="ignore")
+            
+        # Regex 48,49 para capturar claves incluso si Excel borró el '0' inicial
         claves = list(dict.fromkeys(re.findall(r'\d{48,49}', content)))
         
         if claves:
-            registrar_actividad(st.session_state.usuario_actual, f"TEST SRI {titulo}", len(claves))
+            registrar_actividad(st.session_state.usuario_actual, f"INICIÓ DESCARGA {titulo}", len(claves))
             
-            # Barras y contenedores
+            # Inicializar UI
             bar = st.progress(0)
             status = st.empty()
-            log_box = st.expander("📝 Bitácora de Conexión (Ver detalles)", expanded=True)
+            log_box = st.expander("📝 Bitácora de Recuperación (Ver detalles)", expanded=True)
             
             lst = []
             errores = 0 
             recuperadas_online = 0
             zip_buffer = io.BytesIO()
             
-            # 2. Configuración de Sesión (Vital para estabilidad)
+            # 3. Sesión Persistente (Vital para evitar bloqueos del SRI)
             session = requests.Session()
             session.verify = False
             session.headers.update(HEADERS_WS)
-
-            # 3. URLs de los dos ambientes del SRI
-            URL_OFFLINE = "https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl"
-            URL_ONLINE  = "https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantes?wsdl"
 
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zf:
                 for i, cl in enumerate(claves):
                     exito = False
                     origen = ""
                     
-                    # Cuerpo del mensaje SOAP (Es igual para ambos)
+                    # Cuerpo del mensaje SOAP
                     body = f'<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion"><soapenv:Body><ec:autorizacionComprobante><claveAccesoComprobante>{cl}</claveAccesoComprobante></ec:autorizacionComprobante></soapenv:Body></soapenv:Envelope>'
 
-                    # --- INTENTO 1: AMBIENTE OFFLINE (Rápido) ---
+                    # --- INTENTO 1: AMBIENTE OFFLINE (Base de datos estándar) ---
                     try:
-                        time.sleep(0.2) # Breve pausa
+                        time.sleep(0.2) # Pausa técnica
                         r = session.post(URL_OFFLINE, data=body, timeout=8)
                         
-                        # Validamos si TRAE autorización real (no solo respuesta vacía)
+                        # Validamos que la respuesta tenga contenido real
                         if r.status_code == 200 and "<autorizaciones>" in r.text and "<autorizacion>" in r.text:
                             zf.writestr(f"{cl}.xml", r.text)
-                            d = extraer_datos_robusto(io.BytesIO(r.content))
-                            if d: lst.append(d)
-                            exito = True
-                            origen = "OFFLINE"
-                    except: pass
+                            d = extraer_datos_robusto(io.BytesIO(r.content)) # Llama a tu función externa
+                            
+                            # Filtro de tipo de documento
+                            if d and ((tipo_filtro == "RET" and d["TIPO"] == "RET") or (tipo_filtro == "NC" and d["TIPO"] == "NC") or (tipo_filtro == "FC" and d["TIPO"] in ["FC","LC"])): 
+                                lst.append(d)
+                                exito = True
+                                origen = "OFFLINE"
+                    except Exception: pass
 
-                    # --- INTENTO 2: AMBIENTE ONLINE (Rescate) ---
-                    # Si falló el Offline, probamos el Online (donde suelen quedarse las trabadas)
+                    # --- INTENTO 2: AMBIENTE ONLINE (Base de datos de respaldo) ---
+                    # Si falló el Offline (0 comprobantes), buscamos en el Online
                     if not exito:
                         try:
-                            time.sleep(1.5) # Pausa más larga para cambiar de servidor
+                            time.sleep(1.5) # Pausa mayor para cambio de servidor
                             r = session.post(URL_ONLINE, data=body, timeout=12)
                             
                             if r.status_code == 200 and "<autorizaciones>" in r.text and "<autorizacion>" in r.text:
                                 zf.writestr(f"{cl}.xml", r.text)
                                 d = extraer_datos_robusto(io.BytesIO(r.content))
-                                if d: lst.append(d)
-                                exito = True
-                                origen = "ONLINE (RESCATADA)"
-                                recuperadas_online += 1
-                        except Exception as e:
-                            pass # Si falla aquí, ya no hay más opciones
+                                
+                                if d and ((tipo_filtro == "RET" and d["TIPO"] == "RET") or (tipo_filtro == "NC" and d["TIPO"] == "NC") or (tipo_filtro == "FC" and d["TIPO"] in ["FC","LC"])): 
+                                    lst.append(d)
+                                    exito = True
+                                    origen = "ONLINE"
+                                    recuperadas_online += 1
+                        except Exception: pass
 
-                    # --- RESULTADO FINAL ---
+                    # --- BITÁCORA VISUAL ---
                     if exito:
-                        log_box.write(f"✅ {i+1}. {cl[-10:]}... -> DESCARGADO vía {origen}")
+                        if origen == "ONLINE":
+                            log_box.success(f"✅ {i+1}. {cl[-10:]}... RECUPERADA (ONLINE)")
                     else:
                         errores += 1
-                        log_box.error(f"❌ {i+1}. {cl[-10:]}... -> NO ENCONTRADO en ningún ambiente.")
+                        # Opcional: log_box.warning(f"❌ {i+1}. {cl[-10:]}... No encontrada")
 
                     # Actualizar barra
                     bar.progress((i + 1) / len(claves))
-                    status.text(f"Procesando {i+1}/{len(claves)} | Online: {recuperadas_online} | Offline: {len(lst)-recuperadas_online}")
+                    status.text(f"Procesando {i+1}/{len(claves)} | Rescatadas Online: {recuperadas_online} | Total OK: {len(lst)}")
 
-            # 4. Resultados
+            # 4. Resultados Finales
             if lst: 
-                st.success(f"🎉 Proceso Finalizado. Total XMLs: {len(lst)}")
+                st.success(f"🎉 Proceso Finalizado. {len(lst)} documentos procesados correctamente.")
                 if recuperadas_online > 0:
-                    st.info(f"✨ NOTA: Se rescataron {recuperadas_online} facturas usando el servidor ONLINE (las que antes fallaban).")
+                    st.info(f"✨ ÉXITO: El sistema rescató {recuperadas_online} facturas del servidor ONLINE que antes fallaban.")
+                
+                registrar_actividad(st.session_state.usuario_actual, f"GENERÓ EXCEL SRI {titulo}", len(lst))
                 
                 c1, c2 = st.columns(2)
-                with c1: st.download_button(f"📦 Descargar ZIP", zip_buffer.getvalue(), f"{titulo}.zip")
-                with c2: st.download_button(f"📊 Descargar Excel", generar_excel_multiexcel(data_sri_lista=lst, sri_mode=tipo_filtro), f"{titulo}.xlsx")
+                with c1: st.download_button(f"📦 ZIP XMLs {titulo}", zip_buffer.getvalue(), f"{titulo}.zip")
+                with c2: st.download_button(f"📊 Excel {titulo}", generar_excel_multiexcel(data_sri_lista=lst, sri_mode=tipo_filtro), f"{titulo}.xlsx")
             else:
-                st.error("No se pudo descargar ningún documento válido.")
+                st.error("No se pudo descargar ningún documento. Verifique si el SRI está en mantenimiento.")
         else:
-             st.warning("No se encontraron claves válidas en el archivo.")
+             st.warning("No se encontraron claves válidas (48 o 49 dígitos) en el archivo.")
