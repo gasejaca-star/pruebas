@@ -7,45 +7,39 @@ import requests
 import zipfile
 import urllib3
 import time
-import xlsxwriter
 from datetime import datetime
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="SRI LIVE MONITOR", layout="wide", page_icon="📟")
+st.set_page_config(page_title="SRI LIVE MONITOR (STEALTH)", layout="wide", page_icon="🥷")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-HEADERS_WS = {"Content-Type": "text/xml;charset=UTF-8", "User-Agent": "Mozilla/5.0"}
+# --- CONFIGURACIÓN ANTI-BLOQUEO (NUEVO) ---
+# Estas cabeceras hacen creer al SRI que somos un navegador Chrome real, no un script.
+HEADERS_WS = {
+    "Content-Type": "text/xml;charset=UTF-8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive"
+}
+
 URL_OFFLINE = "https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl"
 URL_ONLINE  = "https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantes?wsdl"
 
-def extraer_datos_xml(xml_content):
-    # (Tu función de extracción estándar simplificada para no llenar espacio)
-    try:
-        root = ET.fromstring(xml_content)
-        # Desempaquetado simple para el reporte
-        auth = root.find(".//autorizacion")
-        if auth is None: 
-            # Intentar desempaquetar SOAP si viene sucio
-            text = re.sub(r'<\?xml.*?\?>', '', str(xml_content)).strip()
-            if "<autorizacion>" in text: return {"ESTADO": "RECUPERADO"}
-            return None
-        return {"ESTADO": "OK"}
-    except: return None
-
-# --- INTERFAZ TIPO "HACKER / MONITOR" ---
-st.title("📟 SRI NETWORK MONITOR")
+# --- INTERFAZ ---
+st.title("🥷 SRI MONITOR - MODO SIGILO")
 st.markdown("""
 <style>
     .terminal {
-        background-color: #0e1117;
+        background-color: #000000;
         color: #00ff00;
-        font-family: 'Courier New', Courier, monospace;
+        font-family: 'Consolas', 'Courier New', monospace;
         padding: 10px;
         border-radius: 5px;
-        height: 400px;
+        height: 450px;
         overflow-y: scroll;
         border: 1px solid #333;
-        font-size: 12px;
+        font-size: 13px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -55,19 +49,16 @@ col1, col2 = st.columns([1, 2])
 with col1:
     st.subheader("1. Carga de Archivo")
     archivo = st.file_uploader("Sube el TXT del SRI:", type=["txt"])
-    start_btn = st.button("🔴 INICIAR RASTREO", type="primary", use_container_width=True)
+    start_btn = st.button("🚀 INICIAR RESCATE", type="primary", use_container_width=True)
     
     st.divider()
-    st.metric("Estado del Sistema", "ESPERANDO", delta_color="off")
     stats_ph = st.empty()
 
 with col2:
-    st.subheader("2. Tráfico en Tiempo Real (Live Log)")
-    # Este es el contenedor donde "imprimiremos" lo que pasa
+    st.subheader("2. Tráfico en Tiempo Real")
     log_placeholder = st.empty()
 
 if archivo and start_btn:
-    # Preparación
     try: content = archivo.read().decode("latin-1")
     except: content = archivo.read().decode("utf-8", errors="ignore")
     
@@ -77,92 +68,91 @@ if archivo and start_btn:
         st.error("No hay claves válidas.")
         st.stop()
 
-    # Variables de estado
     log_history = []
+    
+    # Usamos una sesión con adaptadores para reintentos de bajo nivel
     session = requests.Session()
     session.verify = False
     session.headers.update(HEADERS_WS)
     
+    # Adaptador para manejar cortes de conexión
+    adapter = requests.adapters.HTTPAdapter(max_retries=1)
+    session.mount("https://", adapter)
+    
     ok_counter = 0
     fail_counter = 0
+    rescue_counter = 0
     zip_buffer = io.BytesIO()
     
-    # --- FUNCIÓN DE LOGGING VISUAL ---
     def log(mensaje, tipo="INFO"):
-        now = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        icon = "info"
-        if tipo == "REQ": icon = "➡️ OUT"
-        elif tipo == "RES": icon = "⬅️ IN "
-        elif tipo == "ERR": icon = "❌ ERR"
-        elif tipo == "SUCCESS": icon = "✅ OK "
+        now = datetime.now().strftime("%H:%M:%S")
+        color = "white"
+        icon = "ℹ️"
         
-        line = f"[{now}] [{icon}] {mensaje}"
-        log_history.insert(0, line) # Agrega al principio (más reciente arriba)
+        if tipo == "OFF_OK": icon = "✅ OFF"; color = "#4CAF50" # Verde
+        elif tipo == "ON_OK": icon = "🔥 ON "; color = "#00FFFF" # Cyan (Rescate)
+        elif tipo == "EMPTY": icon = "⚠️ VAC"; color = "#FFC107" # Amarillo
+        elif tipo == "ERR": icon = "❌ ERR"; color = "#FF5252" # Rojo
         
-        # Renderizar en la 'ventana' negra
-        log_content = "\n".join(log_history[:50]) # Mostrar últimas 50 líneas
-        log_placeholder.code(log_content, language="bash")
+        # Formato HTML para la terminal simulada
+        line = f"<div style='color:{color};'>[{now}] <b>[{icon}]</b> {mensaje}</div>"
+        log_history.insert(0, line)
+        log_placeholder.markdown(f"<div class='terminal'>{''.join(log_history)}</div>", unsafe_allow_html=True)
 
-    # --- INICIO DEL BUCLE ---
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zf:
         for i, cl in enumerate(claves):
-            stats_ph.markdown(f"**Procesando:** {i+1}/{len(claves)} | **OK:** {ok_counter} | **Fails:** {fail_counter}")
+            stats_ph.info(f"⏳ Procesando: {i+1}/{len(claves)}\n\n✅ Éxitos: {ok_counter}\n🔥 Rescatadas: {rescue_counter}\n❌ Fallos: {fail_counter}")
             
             exito = False
             soap = f'<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion"><soapenv:Body><ec:autorizacionComprobante><claveAccesoComprobante>{cl}</claveAccesoComprobante></ec:autorizacionComprobante></soapenv:Body></soapenv:Envelope>'
             
-            # 1. INTENTO OFFLINE
-            log(f"Consultando Clave: {cl[-8:]}...", "REQ")
+            # --- INTENTO 1: OFFLINE ---
             try:
-                start_t = time.time()
+                # Timeout corto (5s) para el Offline
                 r = session.post(URL_OFFLINE, data=soap, timeout=5)
-                latency = round((time.time() - start_t) * 1000)
                 
-                # Análisis de respuesta
                 if r.status_code == 200:
-                    if "<autorizaciones/>" in r.text or "<numeroComprobantes>0" in r.text:
-                         log(f"OFFLINE ({latency}ms): SRI respondió '0 Comprobantes' (Vacío)", "ERR")
-                    elif "<autorizacion>" in r.text:
-                        log(f"OFFLINE ({latency}ms): AUTORIZADO. Descargando...", "SUCCESS")
+                    if "<autorizacion>" in r.text:
                         zf.writestr(f"{cl}.xml", r.text)
+                        log(f"Clave ...{cl[-8:]} descargada (Offline)", "OFF_OK")
                         ok_counter += 1
                         exito = True
                     else:
-                        log(f"OFFLINE ({latency}ms): Respuesta desconocida.", "ERR")
-                else:
-                    log(f"OFFLINE Error HTTP: {r.status_code}", "ERR")
-                    
+                        log(f"Clave ...{cl[-8:]} no está en Offline (Vacío)", "EMPTY")
             except Exception as e:
-                log(f"Error Conexión Offline: {str(e)}", "ERR")
+                pass # Si falla Offline, vamos directo al Online
 
-            # 2. INTENTO ONLINE (Si falló el 1)
+            # --- INTENTO 2: ONLINE (MODO SIGILO) ---
             if not exito:
-                log("⚠️ Cambiando a servidor ONLINE (Intento de rescate)...", "INFO")
                 try:
-                    time.sleep(0.5)
-                    start_t = time.time()
-                    r = session.post(URL_ONLINE, data=soap, timeout=8)
-                    latency = round((time.time() - start_t) * 1000)
+                    time.sleep(1.0) # Pausa obligatoria para engañar al firewall
+                    
+                    # Timeout largo (15s) porque el Online es lento y pesado
+                    r = session.post(URL_ONLINE, data=soap, timeout=15)
                     
                     if r.status_code == 200:
                         if "<autorizacion>" in r.text:
-                            log(f"ONLINE ({latency}ms): ¡RESCATADA! Encontrada en base Online.", "SUCCESS")
                             zf.writestr(f"{cl}.xml", r.text)
+                             
+                            log(f"¡RESCATADA! Clave ...{cl[-8:]} bajada del Online", "ON_OK")
                             ok_counter += 1
+                            rescue_counter += 1
                             exito = True
                         else:
-                            # AQUÍ ES DONDE VERÁS SI EL SRI TE MIENTE
-                            log(f"ONLINE ({latency}ms): TAMPOCO EXISTE. Respuesta: {r.text[:60]}...", "ERR")
+                            log(f"Fallo definitivo: Clave ...{cl[-8:]} no existe ni en Online.", "ERR")
                     else:
-                         log(f"ONLINE Error HTTP: {r.status_code}", "ERR")
-                except:
-                    log("Error Conexión Online.", "ERR")
+                        log(f"Bloqueo Online HTTP {r.status_code}", "ERR")
+                        
+                except Exception as e:
+                    log(f"Error Conexión Online: {str(e)}", "ERR")
 
             if not exito:
                 fail_counter += 1
-                log(f"❌ DEFINITIVO: Clave {cl[-8:]} no existe en ningún servidor.", "ERR")
 
-    st.success("Proceso Terminado")
+    st.success("Finalizado")
+    if ok_counter > 0:
+        st.download_button("📦 DESCARGAR ZIP FINAL", zip_buffer.getvalue(), "Facturas_Rescatadas.zip", "application/zip", type="primary")
     if ok_counter > 0:
         st.download_button("Bajar ZIP Generado", zip_buffer.getvalue(), "Evidencia_SRI.zip", "application/zip", type="primary")
+
 
