@@ -1,107 +1,108 @@
 import streamlit as st
-import re
-import requests
-import zipfile
+import socket
+import ssl
+import gzip
 import io
-import urllib3
-import time
 
-# --- CONFIGURACIÓN QUEMADA (HARDCODED) ---
-# 1. La Cookie EXACTA que me pasaste (Limpia, sin Path ni Domain)
-COOKIE_FIJA = "TS010a7529=0115ac86d2ff8c6d8602bcd5b76de3c56b0d92b76d207ed83bc26ff7a2b6c9da7e1c6c59a6661e932699d7fda2eb24a82a026c7b15"
+st.set_page_config(page_title="SRI GZIP DECODER", layout="wide", page_icon="🔓")
 
-# 2. Las Cabeceras EXACTAS de Zoom 3.6.0
-HEADERS_ZOOM = {
-    "Accept": "*/*",
-    "Accept-Language": "es-MX,es-EC;q=0.7,es;q=0.3",
-    "Accept-Encoding": "gzip, deflate",
-    "User-Agent": "Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.2; WOW64; Trident/7.0; .NET4.0C; .NET4.0E; Zoom 3.6.0)",
-    "Content-Type": "text/xml;charset=UTF-8",
-    "Connection": "Keep-Alive",
-    "Host": "cel.sri.gob.ec",
-    "Cache-Control": "no-cache",
-    "Cookie": COOKIE_FIJA  # <--- AQUÍ ESTÁ TU LLAVE
-}
+st.title("🔓 DECODIFICADOR GZIP SRI")
+st.markdown("""
+Esta herramienta simula ser Zoom, recibe la respuesta "basura" (GZIP) y la descomprime para revelar la verdad.
+Veremos si esos 236 bytes son una factura o un mensaje de error.
+""")
 
-# 3. El XML EXACTO con la huella "" y los espacios originales
-XML_TEMPLATE = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion">
-   <soapenv:Header/>
-   <soapenv:Body>
-      <ec:autorizacionComprobante>
-         <claveAccesoComprobante>{}</claveAccesoComprobante>
-      </ec:autorizacionComprobante>
-   </soapenv:Body>
+# XML de prueba (El que sabemos que Zoom usa)
+# NOTA: Reemplaza la CLAVE dentro de las llaves {} si quieres probar otra
+XML_TEMPLATE = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion">\r
+   <soapenv:Header/>\r
+   <soapenv:Body>\r
+      <ec:autorizacionComprobante>\r
+         \r
+         <claveAccesoComprobante>{}</claveAccesoComprobante>\r
+      </ec:autorizacionComprobante>\r
+   </soapenv:Body>\r
 </soapenv:Envelope>"""
 
-URL_OFFLINE = "https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl"
+clave_input = st.text_input("Ingresa una CLAVE del 1-8 Enero que falle:", value="0101202601179206778200120010030226137300322130112")
 
-# --- INTERFAZ SIMPLE ---
-st.set_page_config(page_title="SRI ZOOM AUTO-LOGIN", layout="wide", page_icon="🔑")
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-st.title("🔑 SRI ZOOM: Cookie Inyectada")
-st.markdown(f"**Estado:** Cookie cargada automáticamente (`...{COOKIE_FIJA[-10:]}`).")
-
-archivo = st.file_uploader("Sube tu TXT y listo:", type=["txt"])
-
-if archivo and st.button("EJECUTAR CON COOKIE FIJA", type="primary"):
-    # Leer Claves
-    try: content = archivo.read().decode("latin-1")
-    except: content = archivo.read().decode("utf-8", errors="ignore")
+if st.button("OBTENER Y DESCOMPRIMIR"):
+    # Construimos el cuerpo
+    body = XML_TEMPLATE.format(clave_input.strip())
     
-    claves = list(dict.fromkeys(re.findall(r'\d{48,49}', content)))
+    # Construimos los Headers IDÉNTICOS A ZOOM
+    # Nota: Agregamos 'Accept-Encoding: gzip' para que el servidor nos mande el ZIP
+    request = (
+        "POST /comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl HTTP/1.1\r\n"
+        "Accept: */*\r\n"
+        "Accept-Language: es-MX,es-EC;q=0.7,es;q=0.3\r\n"
+        "Accept-Encoding: gzip, deflate\r\n"
+        "User-Agent: Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.2; WOW64; Trident/7.0; .NET4.0C; .NET4.0E; Zoom 3.6.0)\r\n"
+        "Host: cel.sri.gob.ec\r\n"
+        "Content-Type: text/xml;charset=UTF-8\r\n"
+        f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+        "Connection: Keep-Alive\r\n"
+        "SOAPAction: \"\"\r\n"
+        "\r\n"  # Fin de headers
+        f"{body}"
+    )
+
+    host = "cel.sri.gob.ec"
+    port = 443
     
-    if not claves:
-        st.error("No se encontraron claves en el archivo.")
-        st.stop()
-
-    # Preparar Sesión
-    session = requests.Session()
-    session.verify = False
+    # Contexto SSL Inseguro (Como Zoom)
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.set_ciphers('DEFAULT@SECLEVEL=1') 
     
-    bar = st.progress(0)
-    status = st.empty()
-    zip_buffer = io.BytesIO()
-    ok_count = 0
-    errores = []
-
-    st.info(f"Procesando {len(claves)} facturas con la identidad de Zoom...")
-
-    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zf:
-        for i, cl in enumerate(claves):
-            # Inyectar clave limpia
-            payload = XML_TEMPLATE.format(cl.strip())
-            
-            try:
-                # Enviar petición con la Cookie y Headers fijos
-                r = session.post(URL_OFFLINE, data=payload, headers=HEADERS_ZOOM, timeout=10)
+    try:
+        with socket.create_connection((host, port), timeout=10) as sock:
+            with context.wrap_socket(sock, server_hostname=host) as ssock:
+                # Enviar petición
+                ssock.sendall(request.encode('utf-8'))
                 
-                if r.status_code == 200:
-                    if "<autorizacion>" in r.text:
-                        zf.writestr(f"{cl}.xml", r.text)
-                        ok_count += 1
-                        st.toast(f"✅ Bajada: ...{cl[-8:]}")
-                    elif "numeroComprobantes>0" in r.text:
-                        errores.append(f"{cl} -> Vacío (0)")
-                else:
-                    errores.append(f"{cl} -> HTTP {r.status_code}")
+                # Leer respuesta bruta
+                response_data = b""
+                while True:
+                    chunk = ssock.recv(4096)
+                    if not chunk: break
+                    response_data += chunk
+                
+                # Separar Headers del Cuerpo (Body)
+                header_end = response_data.find(b"\r\n\r\n")
+                if header_end != -1:
+                    raw_headers = response_data[:header_end].decode('latin-1')
+                    raw_body = response_data[header_end+4:] # El contenido comprimido
                     
-            except Exception as e:
-                errores.append(f"{cl} -> Error {str(e)}")
+                    st.text("--- HEADERS RECIBIDOS ---")
+                    st.code(raw_headers)
+                    
+                    st.text(f"--- CUERPO COMPRIMIDO ({len(raw_body)} bytes) ---")
+                    st.caption("Esto es lo que antes veías como basura:")
+                    st.code(str(raw_body[:50]) + "...", language="python")
 
-            # Feedback visual
-            bar.progress((i+1)/len(claves))
-            status.markdown(f"**Recuperadas:** `{ok_count}` | **Fallos:** `{len(errores)}`")
-            time.sleep(0.2) # Pausa técnica
+                    # INTENTO DE DESCOMPRESIÓN (LA MAGIA)
+                    st.subheader("🕵️ RESULTADO DESCOMPRIMIDO (LA VERDAD):")
+                    try:
+                        # Si es GZIP, empieza con bytes 1f 8b
+                        if raw_body.startswith(b'\x1f\x8b'):
+                            with gzip.GzipFile(fileobj=io.BytesIO(raw_body)) as f:
+                                xml_real = f.read().decode('utf-8')
+                                st.success("✅ ¡Descompresión Exitosa!")
+                                st.code(xml_real, language="xml")
+                                
+                                if "numeroComprobantes>0" in xml_real:
+                                    st.error("CONCLUSIÓN: El servidor respondió '0 Comprobantes'. Zoom tampoco la tiene en esta petición.")
+                                else:
+                                    st.balloons()
+                                    st.success("CONCLUSIÓN: ¡SÍ HAY FACTURA! Hemos logrado replicar a Zoom.")
+                        else:
+                            st.warning("El cuerpo no parece ser GZIP válido. Intentando leer como texto plano...")
+                            st.code(raw_body.decode('utf-8', errors='ignore'))
+                            
+                    except Exception as e:
+                        st.error(f"Error al descomprimir: {e}")
 
-    st.divider()
-    if ok_count > 0:
-        st.balloons()
-        st.success(f"¡LOGRADO! {ok_count} facturas recuperadas usando la Cookie.")
-        st.download_button("📦 DESCARGAR ZIP", zip_buffer.getvalue(), "Facturas_Recuperadas.zip", "application/zip", type="primary")
-    else:
-        st.error("Resultado: 0 Recuperadas.")
-        st.warning("⚠️ Si sigue fallando, significa que esa Cookie ESPECÍFICA ya caducó (duran 10-15 min). Tendrías que sacar una nueva del navegador y reemplazarla en la línea 11 del código.")
-        if errores:
-            with st.expander("Ver Detalles de Fallo"):
-                st.write(errores)
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
