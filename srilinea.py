@@ -7,62 +7,65 @@ import re
 import zipfile
 import pandas as pd
 
-st.set_page_config(page_title="SRI CLON EXACTO (FOTO FIDDLER)", layout="wide", page_icon="📸")
+st.set_page_config(page_title="SRI: SESSION HIJACK (COOKIE)", layout="wide", page_icon="🍪")
 
-st.title("📸 SRI: CLON EXACTO (Cookie + Formato 412)")
+st.title("🍪 SRI: RECUPERACIÓN POR SESIÓN (COOKIE)")
 st.markdown("""
-**Diagnóstico Final:** El servidor requiere la **Cookie de Sesión (TS...)** para dirigirte al servidor correcto, y espera un XML con formato (no minificado).
-**Instrucción:** Copia el valor de la Cookie `TSxxxx=` desde Fiddler y pégalo abajo.
+**Estrategia:** Usamos la cookie `TS...` capturada de Fiddler para "engañar" al servidor y hacernos pasar por el programa autorizado.
+**Nota:** Si deja de funcionar, la cookie caducó. Saca una nueva de Fiddler y pégala abajo.
 """)
 
-# --- LA PLANTILLA "FORMATEADA" (Basada en tu Foto 5) ---
-# Fíjate que ahora tiene saltos de línea (\r\n) y espacios (indentación)
-# Esto simula el peso de ~412 bytes que vemos en tu captura.
-XML_FORMATO_ZOOM = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion">\r
-   <soapenv:Header/>\r
-   <soapenv:Body>\r
-      <ec:autorizacionComprobante>\r
-         \r
-         <claveAccesoComprobante>{}</claveAccesoComprobante>\r
-      </ec:autorizacionComprobante>\r
-   </soapenv:Body>\r
+# --- CONFIGURACIÓN ---
+# Tu cookie capturada (La pongo por defecto para que sea rápido)
+COOKIE_DEFAULT = "TS010a7529=0115ac86d2ff8c6d8602bcd5b76de3c56b0d92b76d207ed83bc26ff7a2b6c9da7e1c6c59a6661e932699d7fda2eb24a82a026c7b15"
+
+# Plantilla con la indentación EXACTA de tus fotos de Fiddler (412 bytes aprox)
+XML_BODY_TEMPLATE = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion">
+   <soapenv:Header/>
+   <soapenv:Body>
+      <ec:autorizacionComprobante>
+         <claveAccesoComprobante>{}</claveAccesoComprobante>
+      </ec:autorizacionComprobante>
+   </soapenv:Body>
 </soapenv:Envelope>"""
 
-def descargar_con_cookie_robada(clave, cookie_valor):
+def descargar_con_cookie(clave, cookie_actual):
     host = "cel.sri.gob.ec"
     port = 443
     
-    # 1. Preparar el XML con espacios (Como en la foto)
-    body = XML_FORMATO_ZOOM.format(clave.strip())
-    body_bytes = body.encode('utf-8')
+    # 1. Preparar el XML (Ojo: convertimos a UTF-8)
+    # Usamos .replace para asegurar que los saltos de línea sean Windows (\r\n) si es necesario
+    body_str = XML_BODY_TEMPLATE.format(clave.strip()).replace('\n', '\r\n')
+    body_bytes = body_str.encode('utf-8')
     
-    # 2. HEADERS EXACTOS DE TU CAPTURA (FOTO 2 y 5)
-    # Incluimos la COOKIE que es la llave de acceso al servidor bueno.
+    # 2. Construir Headers EXACTOS (Copiados de tu Fiddler)
     headers = (
         "POST /comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl HTTP/1.1\r\n"
         "Accept: */*\r\n"
-        "Accept-Encoding: gzip, deflate\r\n"  # <--- Como en Foto 2
+        "Accept-Encoding: gzip, deflate\r\n"  # Vital: pedimos compresión
         "Accept-Language: es-MX,es-EC;q=0.7,es;q=0.3\r\n"
         "User-Agent: Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.2; WOW64; Trident/7.0; .NET4.0C; .NET4.0E; Zoom 3.6.0)\r\n"
         "Host: cel.sri.gob.ec\r\n"
+        "Content-Type: text/xml;charset=UTF-8\r\n"
         f"Content-Length: {len(body_bytes)}\r\n"
         "Connection: Keep-Alive\r\n"
         "Cache-Control: no-cache\r\n"
-        f"Cookie: {cookie_valor.strip()}\r\n" # <--- LA CLAVE MAESTRA
-        "SOAPAction: \"\"\r\n" # A veces necesario aunque no salga
+        f"Cookie: {cookie_actual.strip()}\r\n" # <--- AQUÍ VA TU LLAVE
+        "SOAPAction: \"\"\r\n"
         "\r\n"
     )
     
+    # Paquete final
     full_payload = headers.encode('latin-1') + body_bytes
 
-    # 3. CONTEXTO SSL (Igual que antes, seguridad baja para servidor viejo)
+    # 3. Conexión SSL Legacy
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     context.set_ciphers('DEFAULT@SECLEVEL=1') 
     
     try:
-        with socket.create_connection((host, port), timeout=15) as sock:
+        with socket.create_connection((host, port), timeout=10) as sock:
             with context.wrap_socket(sock, server_hostname=host) as ssock:
                 ssock.sendall(full_payload)
                 
@@ -73,70 +76,75 @@ def descargar_con_cookie_robada(clave, cookie_valor):
                     if not chunk: break
                     response_data += chunk
                 
-                # 4. PROCESAR
+                # 4. Procesar (Separar Header/Body y Descomprimir)
                 header_end = response_data.find(b"\r\n\r\n")
                 if header_end != -1:
                     raw_body = response_data[header_end+4:]
                     
-                    # GZIP?
+                    # Intentar GZIP (Si empieza con 1f 8b)
                     if raw_body.startswith(b'\x1f\x8b'):
                         try:
                             with gzip.GzipFile(fileobj=io.BytesIO(raw_body)) as f:
                                 return True, f.read().decode('utf-8')
                         except:
-                            return False, "Error Descompresión"
+                            return False, "Error Descompresión GZIP"
                     else:
                         return True, raw_body.decode('utf-8', errors='ignore')
                         
-        return False, "Sin conexión"
+        return False, "Sin respuesta"
     except Exception as e:
         return False, str(e)
 
 # --- INTERFAZ ---
 col1, col2 = st.columns([1, 2])
 with col1:
-    archivo = st.file_uploader("1. Sube tu TXT:", type=["txt"])
+    archivo = st.file_uploader("1. Sube tu TXT de claves:", type=["txt"])
 with col2:
-    cookie_input = st.text_input("2. Pega la COOKIE de Fiddler (TSxxxx=...):", help="Copia todo el texto de la Cookie de la Foto 4")
+    cookie_input = st.text_input("2. Cookie Activa (TS...):", value=COOKIE_DEFAULT)
 
-if archivo and cookie_input and st.button("EJECUTAR CLON CON COOKIE"):
+if archivo and st.button("🚀 INICIAR DESCARGA CON COOKIE"):
     try: content = archivo.read().decode("latin-1")
     except: content = archivo.read().decode("utf-8", errors="ignore")
     claves = list(dict.fromkeys(re.findall(r'\d{49}', content)))
     
-    if not claves: st.stop()
+    if not claves: st.error("No se encontraron claves."); st.stop()
     
     bar = st.progress(0)
+    log = st.empty()
     zip_buffer = io.BytesIO()
     ok_count = 0
     fail_count = 0
-    errores = []
-
+    
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zf:
         for i, cl in enumerate(claves):
-            exito, resultado = descargar_con_cookie_robada(cl, cookie_input)
+            exito, resp = descargar_con_cookie(cl, cookie_input)
             
-            if exito and "<autorizacion>" in resultado:
-                match = re.search(r'(<autorizacion>.*?</autorizacion>)', resultado, re.DOTALL)
-                if match:
-                    zf.writestr(f"{cl}.xml", match.group(1))
-                    ok_count += 1
-            else:
-                fail_count += 1
-                if "numeroComprobantes>0" in str(resultado):
-                    errores.append({"CLAVE": cl, "ERROR": "0 Comprobantes (¿Cookie caducada?)"})
+            if exito:
+                if "<autorizacion>" in resp:
+                    # Extraer XML limpio
+                    match = re.search(r'(<autorizacion>.*?</autorizacion>)', resp, re.DOTALL)
+                    if match:
+                        zf.writestr(f"{cl}.xml", match.group(1))
+                        ok_count += 1
+                        log.success(f"[{i+1}/{len(claves)}] ✅ Recuperada: {cl[-8:]}")
+                    else:
+                        fail_count += 1
+                elif "numeroComprobantes>0" in resp:
+                    log.warning(f"[{i+1}/{len(claves)}] ⚠️ Vacía (0) en SRI")
+                    fail_count += 1
                 else:
-                    errores.append({"CLAVE": cl, "ERROR": str(resultado)[:100]})
+                    fail_count += 1
+            else:
+                log.error(f"Error red: {resp}")
+                fail_count += 1
             
             bar.progress((i+1)/len(claves))
-
+            
+    st.divider()
     if ok_count > 0:
         st.balloons()
-        st.success(f"¡SÍ! {ok_count} facturas recuperadas usando la sesión de Zoom.")
-        st.download_button("📦 DESCARGAR ZIP", zip_buffer.getvalue(), "Facturas_Cookie_Zoom.zip", "application/zip", type="primary")
-    
-    if fail_count > 0:
-        st.warning(f"Fallaron {fail_count}. Asegúrate de copiar la cookie fresca de una petición que ACABE de funcionar en Zoom.")
-        with st.expander("Ver errores"):
-            st.dataframe(pd.DataFrame(errores))
+        st.success(f"¡LOGRADO! {ok_count} facturas recuperadas.")
+        st.download_button("📦 DESCARGAR XMLs", zip_buffer.getvalue(), "Facturas_Rescatadas.zip", "application/zip", type="primary")
+    else:
+        st.error(f"Fallaron {fail_count} facturas. Si todas fallaron, es probable que la Cookie ya haya caducado. Saca una nueva de Fiddler.")
 
