@@ -6,7 +6,11 @@ import io
 import urllib3
 import time
 
-# --- CONFIGURACIÓN DE CIRUJANO ---
+# --- CONFIGURACIÓN QUEMADA (HARDCODED) ---
+# 1. La Cookie EXACTA que me pasaste (Limpia, sin Path ni Domain)
+COOKIE_FIJA = "TS010a7529=0115ac86d2ff8c6d8602bcd5b76de3c56b0d92b76d207ed83bc26ff7a2b6c9da7e1c6c59a6661e932699d7fda2eb24a82a026c7b15"
+
+# 2. Las Cabeceras EXACTAS de Zoom 3.6.0
 HEADERS_ZOOM = {
     "Accept": "*/*",
     "Accept-Language": "es-MX,es-EC;q=0.7,es;q=0.3",
@@ -16,84 +20,61 @@ HEADERS_ZOOM = {
     "Connection": "Keep-Alive",
     "Host": "cel.sri.gob.ec",
     "Cache-Control": "no-cache",
-    "SOAPAction": ""
+    "Cookie": COOKIE_FIJA  # <--- AQUÍ ESTÁ TU LLAVE
 }
 
-# ESTA ES LA PLANTILLA CONGELADA (NO TOCAR ESPACIOS)
-# Hemos replicado la indentación exacta de tu captura.
-XML_EXACTO = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion">\r
-   <soapenv:Header/>\r
-   <soapenv:Body>\r
-      <ec:autorizacionComprobante>\r
-         \r
-         <claveAccesoComprobante>{}</claveAccesoComprobante>\r
-      </ec:autorizacionComprobante>\r
-   </soapenv:Body>\r
+# 3. El XML EXACTO con la huella "" y los espacios originales
+XML_TEMPLATE = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion">
+   <soapenv:Header/>
+   <soapenv:Body>
+      <ec:autorizacionComprobante>
+         <claveAccesoComprobante>{}</claveAccesoComprobante>
+      </ec:autorizacionComprobante>
+   </soapenv:Body>
 </soapenv:Envelope>"""
 
 URL_OFFLINE = "https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl"
 
-st.set_page_config(page_title="SRI BYTE PRECISE", layout="wide", page_icon="📏")
+# --- INTERFAZ SIMPLE ---
+st.set_page_config(page_title="SRI ZOOM AUTO-LOGIN", layout="wide", page_icon="🔑")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-st.title("📏 SRI: Precisión de Bytes")
-st.markdown("Este script verifica que la clave se inyecte limpia, sin espacios fantasma, replicando el `Content-Length`.")
+st.title("🔑 SRI ZOOM: Cookie Inyectada")
+st.markdown(f"**Estado:** Cookie cargada automáticamente (`...{COOKIE_FIJA[-10:]}`).")
 
-col1, col2 = st.columns(2)
-with col1:
-    archivo = st.file_uploader("1. Sube tu TXT:", type=["txt"])
-with col2:
-    cookie_ts = st.text_input("2. Cookie TS (¡OBLIGATORIA!):", placeholder="TS010a7529=...")
+archivo = st.file_uploader("Sube tu TXT y listo:", type=["txt"])
 
-if st.button("INICIAR CIRUGÍA", type="primary"):
-    if not archivo or not cookie_ts:
-        st.error("Falta archivo o Cookie.")
-        st.stop()
-
-    # Headers finales
-    mis_headers = HEADERS_ZOOM.copy()
-    mis_headers["Cookie"] = cookie_ts.strip()
-
-    # Leer Claves y LIMPIARLAS
+if archivo and st.button("EJECUTAR CON COOKIE FIJA", type="primary"):
+    # Leer Claves
     try: content = archivo.read().decode("latin-1")
     except: content = archivo.read().decode("utf-8", errors="ignore")
     
-    # Regex estricto para evitar espacios o saltos de línea al final
-    claves_sucias = re.findall(r'\d{48,49}', content)
-    claves = [c.strip() for c in claves_sucias] # Limpieza forzosa
-    claves = list(dict.fromkeys(claves))
+    claves = list(dict.fromkeys(re.findall(r'\d{48,49}', content)))
     
-    if not claves: st.warning("No hay claves."); st.stop()
+    if not claves:
+        st.error("No se encontraron claves en el archivo.")
+        st.stop()
 
-    # UI
-    log_box = st.expander("Verificación de Bytes (Debug)", expanded=True)
-    bar = st.progress(0)
-    zip_buffer = io.BytesIO()
-    ok_count = 0
-    
+    # Preparar Sesión
     session = requests.Session()
     session.verify = False
+    
+    bar = st.progress(0)
+    status = st.empty()
+    zip_buffer = io.BytesIO()
+    ok_count = 0
+    errores = []
+
+    st.info(f"Procesando {len(claves)} facturas con la identidad de Zoom...")
 
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zf:
         for i, cl in enumerate(claves):
-            # INYECCIÓN: El .strip() garantiza que no entre basura
-            payload = XML_EXACTO.format(cl.strip())
+            # Inyectar clave limpia
+            payload = XML_TEMPLATE.format(cl.strip())
             
-            # CALCULAR PESO (Simulando Content-Length)
-            peso_bytes = len(payload.encode('utf-8'))
-            
-            # Debug visual para la primera clave
-            if i == 0:
-                log_box.info(f"🔍 DIAGNÓSTICO PRIMERA CLAVE:")
-                log_box.code(payload, language="xml")
-                log_box.metric("Peso del Paquete (Content-Length)", f"{peso_bytes} bytes", "Debe ser ~412")
-                
-                if peso_bytes != 412:
-                    log_box.warning(f"⚠️ Nota: El peso es {peso_bytes}. Si la clave tiene 49 dígitos exactos, la diferencia es solo el formato de línea. Enviando de todas formas...")
-
             try:
-                # Enviar petición
-                r = session.post(URL_OFFLINE, data=payload, headers=mis_headers, timeout=8)
+                # Enviar petición con la Cookie y Headers fijos
+                r = session.post(URL_OFFLINE, data=payload, headers=HEADERS_ZOOM, timeout=10)
                 
                 if r.status_code == 200:
                     if "<autorizacion>" in r.text:
@@ -101,17 +82,26 @@ if st.button("INICIAR CIRUGÍA", type="primary"):
                         ok_count += 1
                         st.toast(f"✅ Bajada: ...{cl[-8:]}")
                     elif "numeroComprobantes>0" in r.text:
-                         pass # Vacío
-                
+                        errores.append(f"{cl} -> Vacío (0)")
+                else:
+                    errores.append(f"{cl} -> HTTP {r.status_code}")
+                    
             except Exception as e:
-                pass
+                errores.append(f"{cl} -> Error {str(e)}")
 
+            # Feedback visual
             bar.progress((i+1)/len(claves))
-            time.sleep(0.1)
+            status.markdown(f"**Recuperadas:** `{ok_count}` | **Fallos:** `{len(errores)}`")
+            time.sleep(0.2) # Pausa técnica
 
+    st.divider()
     if ok_count > 0:
         st.balloons()
-        st.success(f"¡LOGRADO! {ok_count} facturas recuperadas.")
-        st.download_button("📦 BAJAR ZIP", zip_buffer.getvalue(), "Facturas_Cirujano.zip", "application/zip", type="primary")
+        st.success(f"¡LOGRADO! {ok_count} facturas recuperadas usando la Cookie.")
+        st.download_button("📦 DESCARGAR ZIP", zip_buffer.getvalue(), "Facturas_Recuperadas.zip", "application/zip", type="primary")
     else:
-        st.error("Sigue dando 0. Diagnóstico final: El formato XML es perfecto. El bloqueo es 100% por la COOKIE (o IP). Asegúrate de que la Cookie 'TS...' sea fresca del navegador.")
+        st.error("Resultado: 0 Recuperadas.")
+        st.warning("⚠️ Si sigue fallando, significa que esa Cookie ESPECÍFICA ya caducó (duran 10-15 min). Tendrías que sacar una nueva del navegador y reemplazarla en la línea 11 del código.")
+        if errores:
+            with st.expander("Ver Detalles de Fallo"):
+                st.write(errores)
