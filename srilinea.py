@@ -20,7 +20,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Endpoints y Configuración
 URL_WS = "https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl"
 HEADERS_WS = {"Content-Type": "text/xml;charset=UTF-8","User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"}
-URL_API_VIRAL = "https://script.google.com/macros/s/AKfycbzzz1KrdRjaZxEAl56BHgzh6kzbeQ304B5HuWTiyZs2PXpFUEhzK-CRUolcGWNF94RT/exec" 
+URL_API_VIRAL = "https://script.google.com/macros/s/AKfycby34vXKtymcy2zt3I8DXHVTDLXL-ZPNdfSEn9E1qRNKbz3dRzB9c7xN5uX_T0Fd5Q8/exec" 
 
 # --- FUNCIONES DE SOPORTE ---
 def conectar_api(payload):
