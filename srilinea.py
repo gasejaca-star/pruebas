@@ -30,7 +30,7 @@ def conectar_api(payload):
     except: return {"exito": False, "mensaje": "Error de conexión"}
 
 def registrar_actividad(usuario, accion, cantidad=None, sugerencia=None):
-    URL_LOGGING = "https://script.google.com/macros/s/AKfycbwur1tNR80874Djv78LG1ed9ZwUOdJbaWC9Ctc39l3510zVSPs_ycntW4-lwo2UOLbm/exec"
+    URL_LOGGING = "https://script.google.com/macros/s/AKfycbzzz1KrdRjaZxEAl56BHgzh6kzbeQ304B5HuWTiyZs2PXpFUEhzK-CRUolcGWNF94RT/exec"
     detalle = f"{accion} ({cantidad} XMLs)" if cantidad is not None else accion
     payload = {"usuario": str(usuario), "accion": str(detalle)}
     if sugerencia: payload["sugerencia"] = str(sugerencia)
