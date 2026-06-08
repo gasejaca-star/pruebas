@@ -23,6 +23,20 @@ HEADERS_WS = {"Content-Type": "text/xml;charset=UTF-8","User-Agent": "Mozilla/5.
 URL_API_VIRAL = "https://script.google.com/macros/s/AKfycby34vXKtymcy2zt3I8DXHVTDLXL-ZPNdfSEn9E1qRNKbz3dRzB9c7xN5uX_T0Fd5Q8/exec" 
 
 # --- FUNCIONES DE SOPORTE ---
+def to_date(fecha_str):
+    if not fecha_str: return None
+    for fmt in ('%d/%m/%Y', '%Y-%m-%d'):
+        try: return datetime.strptime(fecha_str.strip(), fmt)
+        except: pass
+    return None
+
+def norm_fecha(fecha_str):
+    return fecha_str.strip() if fecha_str else ""
+    
+def norm_periodo(periodo_str):
+    if not periodo_str: return ""
+    # Si viene MM/YYYY, lo mantiene limpio
+    return periodo_str.strip()
 def conectar_api(payload):
     try:
         r = requests.post(URL_API_VIRAL, json=payload, timeout=10)
@@ -168,17 +182,78 @@ def extraer_datos_robusto(xml_file):
             data["MES"] = ms.get(fecha.split('/')[1], "DESCONOCIDO")
 
         if tipo == "RET":
-            r_renta, r_iva, b_renta, b_iva = 0.0, 0.0, 0.0, 0.0
-            node = xml_data.find(".//numDocSustento")
-            sus = node.text.replace('-','') if (node is not None and node.text) else ""
-            if len(sus) >= 15: sus = f"{sus[0:3]}-{sus[3:6]}-{sus[6:]}"
+            ret_cols = {
+                "ivabase10": 0.0, "ivaret10": 0.0,
+                "ivabase20": 0.0, "ivaret20": 0.0,
+                "ivabase30": 0.0, "ivaret30": 0.0,
+                "ivabase70": 0.0, "ivaret70": 0.0,
+                "ivabase100": 0.0, "ivaret100": 0.0,
+                "ftecodret": [], "ftebase": 0.0, "fteporcen": [], "ftevalret": 0.0
+            }
+            cod_doc_sustento = ""
+            num_doc_sustento = ""
+            fec_doc_sustento = ""
+            f_norm = fecha  # Asignamos la fecha encontrada
+            fec_autori = buscar(["fechaAutorizacion"]) or fecha
+
             for item in (xml_data.findall(".//impuesto") + xml_data.findall(".//retencion")):
                 try:
-                    c, v, b = item.find("codigo").text, float(item.find("valorRetenido").text or 0), float(item.find("baseImponible").text or 0)
-                    if c == "1": r_renta += v; b_renta += b
-                    elif c == "2": r_iva += v; b_iva += b
+                    codigo = item.find("codigo").text.strip() if item.find("codigo") is not None else ""
+                    base = float(item.find("baseImponible").text or 0)
+                    p_ret = float(item.find("porcentajeRetener").text or 0)
+                    val_ret = float(item.find("valorRetenido").text or 0)
+                    
+                    if item.find("codDocSustento") is not None:
+                        cod_doc_sustento = item.find("codDocSustento").text.strip()
+                    if item.find("numDocSustento") is not None:
+                        num_doc_sustento = item.find("numDocSustento").text.strip().replace("-", "")
+                    if item.find("fechaEmisionDocSustento") is not None:
+                        fec_doc_sustento = norm_fecha(item.find("fechaEmisionDocSustento").text)
+
+                    if codigo == "2": # Mapeo IVA exacto por tramos
+                        p_rounded = round(p_ret)
+                        if p_rounded == 10: ret_cols["ivabase10"] += base; ret_cols["ivaret10"] += val_ret
+                        elif p_rounded == 20: ret_cols["ivabase20"] += base; ret_cols["ivaret20"] += val_ret
+                        elif p_rounded == 30: ret_cols["ivabase30"] += base; ret_cols["ivaret30"] += val_ret
+                        elif p_rounded == 70: ret_cols["ivabase70"] += base; ret_cols["ivaret70"] += val_ret
+                        elif p_rounded == 100: ret_cols["ivabase100"] += base; ret_cols["ivaret100"] += val_ret
+                    elif codigo == "1": # Estructuración de Fuente Renta
+                        c_ret = item.find("codigoRetencion").text.strip() if item.find("codigoRetencion") is not None else ""
+                        if c_ret: ret_cols["ftecodret"].append(c_ret)
+                        ret_cols["ftebase"] += base
+                        ret_cols["fteporcen"].append(f"{p_ret}%")
+                        ret_cols["ftevalret"] += val_ret
                 except: continue
-            data.update({"numfact": sus, "numreten": num_fact, "baserenta": b_renta, "rt_renta": r_renta, "baseiva": b_iva, "rt_iva": r_iva, "TOTAL RET": r_renta+r_iva, "SUSTENTO": sus, "fechaemi": fecha})
+
+            fte_cod = ",".join(dict.fromkeys(ret_cols["ftecodret"]))
+            fte_pct = ",".join(dict.fromkeys(ret_cols["fteporcen"]))
+            
+            # Cálculo de diferencia de días
+            dias_dif = 0
+            try:
+                d1 = to_date(f_norm)
+                d2 = to_date(fec_doc_sustento)
+                if d1 and d2: dias_dif = abs((d1 - d2).days)
+            except: pass
+
+            # Estructura del nuevo reporte solicitado
+            data.update({
+                "ruc_recep": ruc_cli, "nomrecep": nom_cli, "ruc_emisor": ruc_emisor, "razonsocial": razon_social,
+                "claveacceso": buscar(["claveAcceso"]), "numautori": buscar(["numeroAutorizacion"]) or buscar(["claveAcceso"]),
+                "fecautori": fec_autori or f_norm, "numreten": num_fact, "fechaemi": f_norm, "dias_dif": dias_dif,
+                "periodo": norm_periodo(buscar(["periodoFiscal"])), "coddocum": cod_doc_sustento or "01",
+                "numdoc": num_doc_sustento, "fecdocum": fec_doc_sustento,
+                "ivabase10": ret_cols["ivabase10"], "ivaret10": ret_cols["ivaret10"],
+                "ivabase20": ret_cols["ivabase20"], "ivaret20": ret_cols["ivaret20"],
+                "ivabase30": ret_cols["ivabase30"], "ivaret30": ret_cols["ivaret30"],
+                "ivabase70": ret_cols["ivabase70"], "ivaret70": ret_cols["ivaret70"],
+                "ivabase100": ret_cols["ivabase100"], "ivaret100": ret_cols["ivaret100"],
+                "ftecodret": fte_cod, "ftebase": ret_cols["ftebase"], "fteporcen": fte_pct, "ftevalret": ret_cols["ftevalret"],
+                # Mantenimiento de compatibilidad
+                "numfact": num_doc_sustento, "baserenta": ret_cols["ftebase"], "rt_renta": ret_cols["ftevalret"],
+                "baseiva": ret_cols["ivabase30"] + ret_cols["ivabase70"], "rt_iva": ret_cols["ivaret30"] + ret_cols["ivaret70"],
+                "TOTAL RET": ret_cols["ftevalret"] + ret_cols["ivaret30"] + ret_cols["ivaret70"], "SUSTENTO": num_doc_sustento, "fechaemi": f_norm
+            })
         else:
             m = -1 if tipo == "NC" else 1
             b0, b12, i12, ice, prop, no_obj, exento, otra_b, otro_i = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -248,11 +323,16 @@ def generar_excel_multiexcel(data_compras=None, data_ventas_ret=None, data_sri_l
                 cols = ["NOMBRE","RUC","N AUTORIZACION","FECHA","TIPO DE DOCUMENTO","N. FACTURA","MES","RUC CLIENTE","CLIENTE","PROPINAS","BASE. 0","NO OBJ IVA","BASE. 12 / 15","IVA.","TOTAL"]
                 fmt_h = f_amar; sh_nm = "NOTAS DE CREDITO"
             elif sri_mode == "RET":
-                cols = ["ruc_recep", "nomrecep", "fechaemi", "razonsocial", "ruc_emisor", "numfact", "numreten", "baserenta", "rt_renta", "baseiva", "rt_iva", "numautori"]
+                cols = [
+                    "ruc_recep", "nomrecep", "ruc_emisor", "razonsocial", "claveacceso", 
+                    "numautori", "fecautori", "numreten", "fechaemi", "dias_dif", 
+                    "periodo", "coddocum", "numdoc", "fecdocum", 
+                    "ivabase10", "ivaret10", "ivabase20", "ivaret20", 
+                    "ivabase30", "ivaret30", "ivabase70", "ivaret70", 
+                    "ivabase100", "ivaret100", 
+                    "ftecodret", "ftebase", "fteporcen", "ftevalret"
+                ]
                 fmt_h = f_verd; sh_nm = "RETENCIONES"
-            else:
-                cols = ["MES","FECHA","N. FACTURA","TIPO DE DOCUMENTO","RUC","CONTRIBUYENTE","NOMBRE","DETALLE","MEMO","OTRA BASE IVA","OTRO IVA","MONTO ICE","PROPINAS","EXENTO DE IVA","NO OBJ IVA","BASE. 0","BASE. 12 / 15","IVA.","TOTAL","SUBDETALLE"]
-                fmt_h = f_azul; sh_nm = "FACTURAS"
             
             for c in cols: 
                 if c not in df.columns: df[c] = ""
@@ -409,38 +489,16 @@ with tab_xml:
             registrar_actividad(st.session_state.usuario_actual, "GENERÓ INFORME INTEGRAL")
     with m4:
         up_ret = st.file_uploader("Retenciones (XML/ZIP)", type=["xml","zip"], accept_multiple_files=True, key=f"ret_{st.session_state.id_proceso}")
-        st.info("💡 **Reporte de Retenciones:** Sube aquí tus comprobantes de retención (XML o ZIP). El sistema generará un reporte detallando RUC, facturas asociadas, base imponible y valores retenidos de IVA y Renta.")
-        
+        st.info("💡 **Reporte de Retenciones:** Sube comprobantes de retención (XML/ZIP) para estructurarlos de forma extendida.")
         if up_ret and st.button("Generar Reporte Retenciones"):
             raw_data = [extraer_datos_robusto(x) for x in procesar_archivos_entrada(up_ret)]
             rets_data = [d for d in raw_data if d and d["TIPO"] == "RET"]
-            
             if rets_data:
-                # Adaptamos las llaves del diccionario al formato exacto que espera generar_excel_multiexcel para sri_mode="RET"
-                formatted_rets = []
-                for d in rets_data:
-                    formatted_rets.append({
-                        "ruc_recep": d.get("CONTRIBUYENTE", ""),
-                        "nomrecep": d.get("CLIENTE", ""),
-                        "fechaemi": d.get("fechaemi", ""),
-                        "razonsocial": d.get("NOMBRE", ""),
-                        "ruc_emisor": d.get("RUC", ""),
-                        "numfact": d.get("numfact", ""),
-                        "numreten": d.get("numreten", ""),
-                        "baserenta": d.get("baserenta", 0.0),
-                        "rt_renta": d.get("rt_renta", 0.0),
-                        "baseiva": d.get("baseiva", 0.0),
-                        "rt_iva": d.get("rt_iva", 0.0),
-                        "numautori": d.get("N AUTORIZACION", "")
-                    })
-                
-                excel_ret = generar_excel_multiexcel(data_sri_lista=formatted_rets, sri_mode="RET")
-                st.success(f"¡Se procesaron {len(formatted_rets)} retenciones exitosamente!")
+                excel_ret = generar_excel_multiexcel(data_sri_lista=rets_data, sri_mode="RET")
+                st.success(f"¡Se procesaron {len(rets_data)} comprobantes con el nuevo formato!")
                 st.download_button("📥 Descargar Reporte Retenciones", excel_ret, "Reporte_Retenciones.xlsx")
-                registrar_actividad(st.session_state.usuario_actual, "PROCESÓ REPORTE RETENCIONES", len(formatted_rets))
-            else:
-                st.warning("No se encontraron comprobantes de retención válidos en los archivos subidos.")        
-
+                registrar_actividad(st.session_state.usuario_actual, "PROCESÓ REPORTE RETENCIONES EXTENDIDO", len(rets_data))
+            else: st.warning("No se encontraron XMLs de retención válidos.")
 with tab_sri:
     def bloque_sri_persistente(titulo, tipo_filtro, key):
         st.subheader(titulo); up = st.file_uploader(f"TXT {titulo}", type=["txt"], key=f"up_{key}")
@@ -478,6 +536,10 @@ with tab_tutorial:
     st.subheader("🎥 Tutorial: Aprende a usar RAPIDITO AI")
     # st.video automáticamente carga el reproductor en grande dentro de la pestaña y permite darle play
     st.video("https://youtu.be/0iUAI3NAkww?si=aR-Xf9F-GeD1Kj1S")
+
+
+
+
 
 
 
